@@ -12,7 +12,7 @@ __all__ = [
 ]
 
 __package__ = "miroslava"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "XAMES3"
 __maintainer__ = "XAMES3"
 __email__ = "xames3.kaamiki@gmail.com"
