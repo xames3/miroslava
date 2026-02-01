@@ -123,6 +123,8 @@ ignore = [
   "EXE002",   # Script file is executable but does not have a shebang
   "F403",     # Name may be undefined
   "F405",     # Name defined from star imports
+  "FBT001",   # Boolean-typed positional argument in function definition
+  "FBT002",   # Boolean default argument in function definition
   "FBT003",   # Boolean positional value in function call
   "INP001",   # Part of implicit namespace package
   "ISC001",   # Implicitly concatenated string literals (conflicts with formatter)
@@ -176,9 +178,7 @@ ban-relative-imports = "all"
 case-sensitive = true
 combine-as-imports = true
 force-single-line = true
-force-sort-within-sections = true
 known-first-party = ["miroslava"]
-lines-after-imports = 2
 order-by-type = true
 relative-imports-order = "closest-to-furthest"
 required-imports = ["from __future__ import annotations"]
