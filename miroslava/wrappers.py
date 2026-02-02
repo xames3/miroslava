@@ -201,7 +201,9 @@ class Response:
     ) -> None:
         """Initialise the response object from flexible inputs."""
         self.headers: Headers = Headers(headers or {})
-        self.status, self.status_code = self._clean_status(status)
+        if status is None:
+            status = self.default_status
+        self.status = status
         if content_type is None:
             if mimetype is None and "Content-Type" not in self.headers:
                 mimetype = self.default_mimetype
@@ -225,33 +227,25 @@ class Response:
         body = f"{sum(map(len, self.iter_encoded()))} bytes"
         return f"<{type(self).__name__} {body} [{self.status}]>"
 
-    def iter_encoded_(self) -> Iterator[bytes]:
-        """Iterate over the response and yield them as bytes."""
-        for item in self.response:
-            yield item.encode() if isinstance(item, str) else item
+    @property
+    def status_code(self) -> int:
+        """Return HTTP status code as a number."""
+        return self._status_code
+
+    @status_code.setter
+    def status_code(self, code: int) -> None:
+        """Set an HTTP status code."""
+        self.status = code
 
     @property
     def status(self) -> str:
         """Return the concatenated status code and phrase."""
-        return f"{self.status_code} {self.status_phrase}".rstrip()
+        return self._status
 
-    def get_data(self, as_text: bool = False) -> str | bytes:
-        """Return the stored payload as bytes or text.
-
-        :param as_text: When ``True``, decode the body using the
-            supplied charset.
-        :return: Decoded payload based on passed argument.
-        """
-        data = b"".join(self.iter_encoded())
-        return data.decode() if as_text else data
-
-    def set_data(self, value: str | bytes) -> None:
-        """Replace the payload data on the response."""
-        if isinstance(value, str):
-            self.response = value.encode()
-            return
-        self.response = [value]
-        self.headers["Content-Length"] = str(len(value))
+    @status.setter
+    def status(self, value: str | int | HTTPStatus) -> None:
+        """Set HTTP status."""
+        self._status, self._status_code = self._clean_status(value)
 
     @staticmethod
     def _clean_status(value: int | str | HTTPStatus) -> tuple[str, int]:
@@ -282,5 +276,28 @@ class Response:
                     "Status must start with an integer code"
                 ) from verr
         raise TypeError("Invalid status value type")
+
+    def iter_encoded(self) -> Iterator[bytes]:
+        """Iterate over the response and yield them as bytes."""
+        for item in self.response:
+            yield item if isinstance(item, bytes) else str(item).encode()
+
+    def get_data(self, as_text: bool = False) -> str | bytes:
+        """Return the stored payload as bytes or text.
+
+        :param as_text: When ``True``, decode the body using the
+            supplied charset.
+        :return: Decoded payload based on passed argument.
+        """
+        data = b"".join(self.iter_encoded())
+        return data.decode() if as_text else data
+
+    def set_data(self, value: str | bytes) -> None:
+        """Replace the payload data on the response."""
+        if isinstance(value, str):
+            self.response = value.encode()
+            return
+        self.response = [value]
+        self.headers["Content-Length"] = str(len(value))
 
     data = property(get_data, set_data)
