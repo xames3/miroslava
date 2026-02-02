@@ -1,74 +1,83 @@
 """\
-Miroslava's sans-IO Request/Response
-====================================
+Miroslava's Wrappers
+====================
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 26 January, 2026
-Last updated on: 31 January, 2026
+Last updated on: 02 February, 2026
 
-This module implements basic sans-IO abstractions related to
-request/responses.
+This module provides the public ``Request`` and ``Response`` classes.
+
+The ``Request`` class turns a WSGI environment mapping into a
+friendlier object that exposes parsed query arguments, form data, and
+JSON bodies.
+
+The ``Response`` class holds outgoing HTTP payloads, status metadata,
+and headers, keeping its interface close to Flask's base response type
+so that view functions can return strings, bytes, iterables, or fully
+constructed ``Response`` objects.
 """
 
 from __future__ import annotations
 
+import json
 import typing as t
+from http import HTTPStatus
 from urllib.parse import parse_qsl
 
+from miroslava.datastructures import Headers
 from miroslava.datastructures import MultiDict
 from miroslava.utils import _get_server
 from miroslava.utils import get_content_type
 from miroslava.utils import get_current_url
-from miroslava.utils import set_module
 
 if t.TYPE_CHECKING:
     from collections.abc import Iterable
     from collections.abc import Iterator
     from collections.abc import Mapping
-    from http import HTTPStatus
 
-type EnvironHeaders = MultiDict
-type Headers = MultiDict
 type WSGIEnvironment = dict[str, t.Any]
 
+EnvironHeaders = Headers
 
-@set_module("miroslava.sansio.response")
-class _SansIORequest:
-    """Represents the non-IO parts of an HTTP request, including the
-    method, URL, info, and headers.
 
-    :param method: The method the request was made with.
-    :param scheme: The URL scheme of the protocol the request used.
-    :param server: The address of the server.
-    :param root_path: Prefix that the application is mounted under.
-    :param path: Path part of the URL after `root_path`.
-    :param query_string: The part of URL after the `?`.
-    :param headers: The headers received with the request.
-    :param remote_addr: The address of the client sending the request.
+class Request:
+    """Represents an incoming WSGI HTTP request.
+
+    A ``Request`` instance stores the raw WSGI environment and exposes
+    higher-level helpers for the HTTP method, path, query string, and
+    body.
+
+    Instances are created per request during dispatch and should be
+    treated as read-only representations of the inbound message.
+
+    :param environ: Mapping containing the CGI-style WSGI keys for
+        the active request.
     """
 
-    paramter_storage_class: MultiDict[str, str]
+    parameter_storage_class: MultiDict[str, str]
 
-    def __init__(
-        self,
-        method: str,
-        scheme: str,
-        server: tuple[str, int | None] | None,
-        root_path: str,
-        path: str,
-        query_string: str,
-        headers: EnvironHeaders,
-        remote_addr: str | None,
-    ) -> None:
-        """Initialise a request object with HTTP request details."""
-        self.method = method.upper()
-        self.scheme = scheme
-        self.server = server
-        self.root_path = root_path.rstrip("/")
-        self.path = "/" + path.lstrip("/")
-        self.query_string = query_string
-        self.headers = headers
-        self.remote_addr = remote_addr
+    def __init__(self, environ: WSGIEnvironment) -> None:
+        """Initialise a request object from the WSGI environment."""
+        self.environ: WSGIEnvironment = environ
+        self.method: str = environ.get("REQUEST_METHOD", "GET").upper()
+        self.scheme: str = environ.get("wsgi.url_scheme", "http")
+        self.server: tuple[str, int | None] | None = _get_server(environ)
+        self.root_path: str = environ.get("SCRIPT_NAME", "")
+        self.path: str = environ.get("PATH_INFO", "/")
+        self.query_string: str = environ.get("QUERY_STRING", "")
+        self.headers: EnvironHeaders = EnvironHeaders()
+        for key, value in environ.items():
+            if key.startswith("HTTP_"):
+                header = key[5:].replace("_", "-").title()
+                self.headers[header] = value
+            elif key in ("CONTENT_LENGTH", "CONTENT_TYPE"):
+                header = key.replace("_", "-").title()
+                self.headers[header] = value
+        self.remote_addr: str | None = environ.get("REMOTE_ADDR")
+        self.data: bytes = environ.get("miroslava.request_body", b"")
+        self._form: MultiDict[str, str] | None = None
+        self._json: dict[str, t.Any] | None = None
 
     def __repr__(self) -> str:
         """Human-readable representation of the `Request` object."""
@@ -76,7 +85,11 @@ class _SansIORequest:
 
     @property
     def args(self) -> MultiDict[str, str]:
-        """Return the parsed URL parameters."""
+        """Return parsed query parameters from the URL.
+
+        The query string is decoded into a MultiDict so repeated keys
+        remain accessible.
+        """
         return self.parameter_storage_class(
             parse_qsl(self.query_string, keep_blank_values=True)
         )
@@ -104,127 +117,75 @@ class _SansIORequest:
             self.query_string,
         )
 
+    @property
+    def form(self) -> MultiDict[str, str]:
+        """Return parsed form data for URL-encoded bodies.
 
-class Request(_SansIORequest):
-    """Represents an incoming WSGI HTTP request, with headers and body.
+        When the ``Content-Type`` header indicates form submission, the
+        cached body is decoded as UTF-8 and split into a ``MultiDict``.
+        When the body is absent or parsing fails, an empty
+        ``MultiDict`` is provided.
 
-    Based on various HTTP specs, the `Request` object has necessary
-    properties and methods for functioning as a proper HTTP request.
+        .. note::
 
-    :param environ: WSGI environment created by the server, containing
-        all the necessary details about server configuration and client
-        request.
-    """
+            Accessing this property does not mutate the request.
+        """
+        if self._form is None:
+            if "application/x-www-form-urlencoded" in self.headers.get(
+                "Content-Type", ""
+            ):
+                try:
+                    self._form = self.parameter_storage_class(
+                        parse_qsl(self.data.decode(), keep_blank_values=True)
+                    )
+                except Exception:
+                    self._form = MultiDict()
+            else:
+                self._form = MultiDict()
+        return self._form
 
-    def __init__(self, environ: WSGIEnvironment) -> None:
-        """Initialise a request instance from WSGI environment."""
-        super().__init__(
-            method=environ.get("REQUEST_METHOD", "GET"),
-            scheme=environ.get("URL_SCHEME", "http"),
-            server=_get_server(environ),
-            root_path=environ.get("SCRIPT_NAME", ""),
-            path=environ.get("PATH_INFO", ""),
-            query_string=environ.get("QUERY_STRING", ""),
-            headers=EnvironHeaders(environ),
-            remote_addr=environ.get("REMOTE_ADDR"),
-        )
-        self.environ = environ
-        self.form: MultiDict[str, str] = MultiDict()
-        self.data: bytes = b""
-        self.json: dict[str, t.Any] | None = None
+    @property
+    def json(self) -> dict[str, t.Any] | None:
+        """Return parsed JSON content when the request body is JSON.
+
+        The method checks the ``Content-Type`` header for an
+        ``application/json`` marker before attempting to decode the
+        cached body. On decoding errors the property yields ``None`` to
+        mirror Flask's behaviour when silent parsing is desired.
+        """
+        if self._json is None and "application/json" in self.headers.get(
+            "Content-Type", ""
+        ):
+            try:
+                self._json = json.loads(self.data.decode())
+            except Exception:
+                self._json = None
+        return self._json
 
 
-@set_module("miroslava.sansio.request")
-class _SansIOResponse:
-    """Represents teh non-IO parts of an HTTP response, specifically
-    the status and headers, but not the body.
+class Response:
+    """Represents an outgoing WSGI response.
 
-    :param status: The HTTP status code, defaults to `None`.
-    :param headers: Dictionary of headers to include in response.
-    :param mimetype: Mimetype of the response, defaults to `None`.
-    :param content_type: Complete content type of the response,
-        defaults to `None`.
+    This class mirrors Flask's response object by capturing the status
+    code, reason phrase, headers, and body. It accepts common return
+    value shapes from view functions, including strings, bytes, and
+    iterables of bytes. The stored data can be read back as bytes or
+    decoded text, and the status line is normalised to include an
+    integer code and phrase.
+
+    :param response: Payload content as a string, bytes, iterable of
+        bytes, or None for an empty body.
+    :param status: HTTP status code or string; integers are matched
+        to HTTPStatus for a reason phrase when possible.
+    :param headers: Initial header mapping to apply to the response.
+    :param mimetype: Convenience mimetype; resolved to a content
+        type with charset for textual types.
+    :param content_type: Explicit content type overriding mimetype.
     """
 
     default_status: t.ClassVar[int] = 200
     default_mimetype: t.ClassVar[str | None] = "text/plain"
     headers: Headers
-
-    def __init__(
-        self,
-        status: int | str | HTTPStatus | None = None,
-        headers: (
-            MultiDict[str, str | Iterable[str]]
-            | Mapping[str, str | Iterable[str]]
-            | Iterable[tuple[str, str]]
-            | None
-        ) = None,
-        mimetype: str | None = None,
-        content_type: str | None = None,
-    ) -> None:
-        """Initialise a response object with status and headers."""
-        if isinstance(headers, Headers):
-            self.headers = headers
-        elif not headers:
-            self.headers = Headers()
-        else:
-            self.headers = Headers(headers)
-        if content_type is None:
-            if mimetype is None and "content-type" not in self.headers:
-                mimetype = self.default_mimetype
-            if mimetype is not None:
-                mimetype = get_content_type(mimetype, "utf-8")
-            content_type = mimetype
-        if content_type is not None:
-            self.headers["Content=Type"] = content_type
-        if status is None:
-            status = self.default_status
-        self.status = status
-
-    def __repr__(self) -> str:
-        """Human-readable representation of the `Response` object."""
-        return f"<{type(self).__name__} [{self.status}]>"
-
-    @property
-    def status_code(self) -> int:
-        """Return the HTTP status code."""
-        return int(self._status_code)
-
-    @status_code.setter
-    def status_code(self, code: int) -> None:
-        """Set the HTTP status code."""
-        self.status = code
-
-    @property
-    def status(self) -> str:
-        """Return the HTTP status code as a string."""
-        return self._status
-
-    @status.setter
-    def status(self, value: str | int | HTTPStatus) -> None:
-        """Set the HTTP status code."""
-        raise NotImplementedError
-
-
-class Response(_SansIOResponse):
-    """Represents an outgoing WSGI HTTP response with body, status, and
-    headers.
-
-    Similar to `Request`, based on various HTTP specs, the `Response`
-    object too has necessary properties and methods for functioning as
-    a proper HTTP response.
-
-    :param response: Data for the body of the response, defaults to
-        `None`.
-    :param status: The HTTP status code, defaults to `None`.
-    :param headers: Dictionary of headers to include in response.
-    :param mimetype: Mimetype of the response, defaults to `None`.
-    :param content_type: Complete content type of the response,
-        defaults to `None`.
-    :param direct_passthrough: Pass the response body directly through
-        as the WSGI iterable, defaults to `False`.
-    """
-
     response: Iterable[str] | Iterable[bytes]
 
     def __init__(
@@ -236,45 +197,90 @@ class Response(_SansIOResponse):
         ) = None,
         mimetype: str | None = None,
         content_type: str | None = None,
-        *,
         direct_passthrough: bool = False,
     ) -> None:
-        """Initialise a response instance with necessary details."""
-        super().__init__(
-            status=status,
-            headers=headers,
-            mimetype=mimetype,
-            content_type=content_type,
-        )
-        self.direct_passthrough = direct_passthrough
+        """Initialise the response object from flexible inputs."""
+        self.headers: Headers = Headers(headers or {})
+        self.status, self.status_code = self._clean_status(status)
+        if content_type is None:
+            if mimetype is None and "Content-Type" not in self.headers:
+                mimetype = self.default_mimetype
+            if mimetype is not None:
+                mimetype = get_content_type(mimetype, "utf-8")
+            content_type = mimetype
+        if content_type:
+            self.headers["Content-Type"] = content_type
         if response is None:
-            self.response = []
-        elif isinstance(response, (str, bytes, bytearray)):
-            self.set_data(response)
-        else:
+            self.response: bytes = b""
+        elif isinstance(response, str):
+            self.response = response.encode()
+        elif isinstance(response, bytes):
             self.response = response
+        else:
+            self.response = b"".join(response)
+        self.direct_passthrough = direct_passthrough
 
     def __repr__(self) -> str:
-        """Human-readable representation of the `Response` object."""
+        """Human-readable representation of the response object."""
         body = f"{sum(map(len, self.iter_encoded()))} bytes"
         return f"<{type(self).__name__} {body} [{self.status}]>"
 
-    def iter_encoded(self) -> Iterator[bytes]:
+    def iter_encoded_(self) -> Iterator[bytes]:
         """Iterate over the response and yield them as bytes."""
         for item in self.response:
             yield item.encode() if isinstance(item, str) else item
 
-    @t.override
-    def get_data(self, as_text: bool = False) -> bytes | str:
-        """Return the string representation of the request body."""
+    @property
+    def status(self) -> str:
+        """Return the concatenated status code and phrase."""
+        return f"{self.status_code} {self.status_phrase}".rstrip()
+
+    def get_data(self, as_text: bool = False) -> str | bytes:
+        """Return the stored payload as bytes or text.
+
+        :param as_text: When ``True``, decode the body using the
+            supplied charset.
+        :return: Decoded payload based on passed argument.
+        """
         data = b"".join(self.iter_encoded())
         return data.decode() if as_text else data
 
-    def set_data(self, value: bytes | str) -> None:
-        """Set a new string as response."""
+    def set_data(self, value: str | bytes) -> None:
+        """Replace the payload data on the response."""
         if isinstance(value, str):
-            value = value.encode()
+            self.response = value.encode()
+            return
         self.response = [value]
         self.headers["Content-Length"] = str(len(value))
+
+    @staticmethod
+    def _clean_status(value: int | str | HTTPStatus) -> tuple[str, int]:
+        """Normalise status inputs to a numeric code and phrase."""
+        if isinstance(value, HTTPStatus):
+            return value.phrase, value.value
+        if isinstance(value, int):
+            try:
+                status = HTTPStatus(value)
+            except ValueError:
+                return "", value
+            else:
+                return status.phrase, value
+        if isinstance(value, str):
+            parts = value.split(" ", 1)
+            try:
+                status_code = int(parts[0])
+                if len(parts) > 1:
+                    return parts[1], status_code
+                try:
+                    status = HTTPStatus(status_code)
+                except ValueError:
+                    return "", status_code
+                else:
+                    return status.phrase, status_code
+            except ValueError as verr:
+                raise ValueError(
+                    "Status must start with an integer code"
+                ) from verr
+        raise TypeError("Invalid status value type")
 
     data = property(get_data, set_data)
