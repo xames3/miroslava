@@ -131,7 +131,6 @@ def render_template(
 
     :param template_name_or_list: Template filename or list of fallback
         names to try in order.
-    :param context: Values to interpolate into the template source.
     :raises TemplateNotFoundError: When no templates are found.
     """
     templates = (
@@ -140,11 +139,26 @@ def render_template(
         else template_name_or_list
     )
     content: str | None = None
+    try:
+        from miroslava.globals import current_app
+
+        root_dir = current_app.root_path
+        template_dir = current_app.template_folder or "templates"
+    except Exception:
+        root_dir = os.getcwd()
+        template_dir = "templates"
+
     for template in templates:
-        path = os.path.join("templates", template)
-        if os.path.exists(path):
-            with open(path) as html:
-                content = html.read()
+        candidates = [
+            os.path.join(root_dir, template_dir, template),
+            os.path.join("templates", template),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                with open(candidate) as html:
+                    content = html.read()
+                break
+        if content is not None:
             break
     if content is None:
         raise TemplateNotFoundError(f"Template(s) not found: {templates}")
