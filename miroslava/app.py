@@ -4,7 +4,7 @@ Miroslava's Application
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 31 January, 2026
-Last updated on: 02 February, 2026
+Last updated on: 03 February, 2026
 
 The primary application classes which ties together routing, configs,
 and the server loop.
@@ -55,6 +55,7 @@ type ResponseReturnValue = (
     | tuple[ResponseValue, int]
     | tuple[ResponseValue, int, HeadersValue]
 )
+type WSGIEnvironment = dict[str, t.Any]
 RouteCallable = t.Callable[..., ResponseReturnValue]
 T_route = t.TypeVar("T_route", bound=RouteCallable)
 
@@ -465,10 +466,10 @@ class Miroslava(App):
         print(f" * Running on http://{host}:{port}/\nPress CTRL+C to quit")
         try:
             while True:
-                client, addr = server.accept()
+                client, client_address = server.accept()
                 threading.Thread(
-                    target=self._handle_client,
-                    args=(client, addr),
+                    target=self.handle_client,
+                    args=(client, client_address),
                     daemon=True,
                 ).start()
         except KeyboardInterrupt:
@@ -476,10 +477,10 @@ class Miroslava(App):
         finally:
             server.close()
 
-    def _handle_client(
+    def handle_client(
         self,
         client: socket.socket,
-        addr: tuple[str, int],
+        client_address: tuple[str, int],
     ) -> None:
         """Handle incoming request by dispatching.
 
@@ -492,7 +493,7 @@ class Miroslava(App):
         when debug mode is enabled.
 
         :param client: The client socket connection.
-        :param addr: The client address tuple (host, port).
+        :param client_address: The client address tuple (host, port).
         """
         try:
             buffer = b""
@@ -504,7 +505,7 @@ class Miroslava(App):
             if b"\r\n\r\n" not in buffer:
                 return
             headers_data, body_data = buffer.split(b"\r\n\r\n", 1)
-            environ = self._make_environ(headers_data)
+            environ = self.make_environ(headers_data)
             cl = environ.get("CONTENT_LENGTH")
             if cl:
                 length = int(cl)
@@ -516,18 +517,18 @@ class Miroslava(App):
                 environ["miroslava.request_body"] = body_data
 
             request = self.request_class(environ)
-            ctx = RequestContext(self, environ, request=request)
-            app_c = AppContext(self)
+            request_ctx = RequestContext(self, environ, request=request)
+            app_ctx = AppContext(self)
 
-            app_c.push()
-            ctx.push()
+            app_ctx.push()
+            request_ctx.push()
             try:
                 response = self.dispatch_request(request)
-                self._log_request(addr, request, response)
-                self._send_response(client, response)
+                self.log_request(client_address, request, response)
+                self.send_response(client, response)
             finally:
-                ctx.pop()
-                app_c.pop()
+                request_ctx.pop()
+                app_ctx.pop()
         except Exception as err:
             print(f"Internal Server Error: {err}")
             if not self.config["DEBUG"]:
@@ -537,20 +538,21 @@ class Miroslava(App):
         finally:
             client.close()
 
-    def _make_environ(self, header_bytes: bytes) -> dict[str, t.Any]:
-        """Convert raw header bytes into a WSGI-like environment dict.
+    def make_environ(self, headers: bytes) -> WSGIEnvironment:
+        """Convert raw header bytes into a WSGI-like environment
+        dictionary.
 
         The parser extracts the request line, path, query string, and
-        maps headers to CGI-style keys. Content-Length and Content-Type
-        are stored without the HTTP_ prefix while all other headers are
-        namespaced with HTTP_ to mirror the WSGI standard.
+        maps headers to CGI-style keys. The ``Content-Length`` and
+        ``Content-Type`` are stored without the ``HTTP_`` prefix while
+        all other headers are namespaced with ``HTTP_`` to mirror the
+        WSGI standard.
 
-        :param header_bytes: Raw bytes containing the request line and
+        :param headers: Raw bytes containing the request line and
             header block.
         """
-        header_text = header_bytes.decode("utf-8", "ignore")
-        lines = header_text.split("\r\n")
-        request_line = lines[0].split()
+        lines = headers.decode("utf-8", "ignore").split("\r\n")
+        request_url = lines[0].split()
         environ = {
             "REQUEST_METHOD": "GET",
             "PATH_INFO": "/",
@@ -559,9 +561,9 @@ class Miroslava(App):
             "SERVER_PORT": "9001",
             "wsgi.url_scheme": "http",
         }
-        if len(request_line) >= 2:
-            environ["REQUEST_METHOD"] = request_line[0]
-            path = request_line[1]
+        if len(request_url) >= 2:
+            environ["REQUEST_METHOD"] = request_url[0]
+            path = request_url[1]
             if "?" in path:
                 path, query = path.split("?", 1)
                 environ["QUERY_STRING"] = query
@@ -576,26 +578,29 @@ class Miroslava(App):
                     environ[f"HTTP_{key}"] = value.strip()
         return environ
 
-    def dispatch_request(self, req: Request) -> Response:
+    def dispatch_request(self, request: Request) -> Response:
         """Match route and return a response object.
 
-        The dispatcher matches the incoming path against the url_map,
-        validates the HTTP method, and invokes the registered view
-        function. View return values are normalised with make_response so
-        tuples, mappings, and Response objects are handled consistently.
-        Static file requests containing a period in the path are served
-        from the configured static_folder. Missing routes yield a 404
-        response.
+        The dispatcher matches the incoming path against the
+        ``url_map``, validates the HTTP method, and invokes the
+        registered view function.
 
-        :param req: The request object to dispatch.
-        :return: A Response object.
+        View return values are normalised with make_response so tuples,
+        mappings, and ``Response`` objects are handled consistently.
+
+        Static file requests containing a period in the path are served
+        from the configured ``static_folder``. Missing routes yield a
+        ``404`` response.
+
+        :param request: The request object to dispatch.
+        :return: Response object.
         """
-        if "." in req.path and not req.path.endswith("/"):
-            return self._serve_static(req.path)
-        if req.path in self.url_map:
-            rule_data = self.url_map[req.path]
+        if "." in request.path and not request.path.endswith("/"):
+            return self.send_static_file(request.path)
+        if request.path in self.url_map:
+            rule_data = self.url_map[request.path]
             allowed_methods = rule_data["methods"]
-            if req.method not in allowed_methods:
+            if request.method not in allowed_methods:
                 return self.response_class("Method Not Allowed", status=405)
             endpoint = rule_data["endpoint"]
             view_func = self.view_functions[endpoint]
@@ -603,7 +608,7 @@ class Miroslava(App):
             return self.make_response(response_value)
         return self.response_class("Not Found", status=404)
 
-    def _serve_static(self, path: str) -> Response:
+    def send_static_file(self, path: str) -> Response:
         """Serve static files.
 
         :param path: The path to the static file including the leading
@@ -611,47 +616,47 @@ class Miroslava(App):
         :return: A Response object containing the file data or a 404
             response when the file is missing.
         """
-        safe_path = path.lstrip("/")
+        path = path.lstrip("/")
         static_prefix = (self.static_url_path or "static").lstrip("/")
-        if safe_path.startswith((f"{static_prefix}/", "static/")):
-            safe_path = safe_path.split("/", 1)[1]
-        full_path = (
-            os.path.join(self.static_folder or "", safe_path)
-            if self.static_folder
-            else safe_path
-        )
-        if os.path.exists(full_path) and os.path.isfile(full_path):
-            with open(full_path, "rb") as f:
+        if path.startswith((f"{static_prefix}/", "static/")):
+            path = path.split("/", 1)[1]
+        if self.static_folder:
+            path_str = os.path.join(self.root_path, self.static_folder, path)
+        else:
+            path_str = os.path.join(self.root_path, path)
+        if os.path.exists(path_str) and os.path.isfile(path_str):
+            with open(path_str, "rb") as f:
                 data = f.read()
-            mimetype, _ = mimetypes.guess_type(full_path)
+            mimetype, _ = mimetypes.guess_type(path_str)
             return self.response_class(
                 data, mimetype=mimetype or "application/octet-stream"
             )
         return self.response_class("Not Found", status=404)
 
-    def _log_request(
+    def log_request(
         self,
-        addr: tuple[str, int],
-        req: Request,
+        client_address: tuple[str, int],
+        request: Request,
         response: Response,
     ) -> None:
         """Log the incoming request details to stdout.
 
-        The format mimics the default access logs provided by Werkzeug:
-        `host - - [Date] "METHOD Path HTTP/1.1" Status -`
+        The format mimics the default access logs::
 
-        :param addr: The client address tuple (host, port).
-        :param req: The request object.
+            ``host - - [Date] "METHOD Path HTTP/1.1" Status -``
+
+        :param client_address: The client address tuple (host, port).
+        :param request: The request object.
         :param response: The response object.
         """
         now = datetime.now().strftime("%d/%b/%Y %H:%M:%S")
         print(
-            f'{addr[0]} - - [{now}] "{req.method} {req.path} '
-            f'{req.environ.get("SERVER_PROTOCOL", "HTTP/1.1")}" '
+            f'{client_address[0]} - - [{now}] "{request.method} {request.path} '
+            f'{request.environ.get("SERVER_PROTOCOL", "HTTP/1.1")}" '
             f"{response.status_code} -"
         )
 
-    def _send_response(self, client: socket.socket, response: Response) -> None:
+    def send_response(self, client: socket.socket, response: Response) -> None:
         """Send a Response object to the client socket.
 
         :param client: The client socket.
