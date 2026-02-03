@@ -4,41 +4,51 @@ Miroslava's Application
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 31 January, 2026
-Last updated on: 31 January, 2026
+Last updated on: 02 February, 2026
 
-The main application class that ties together routing, configuration,
-and the server loop. The main `Miroslava` class implemented in this
-module actually implements the WSGI interface (at least conceptually)
-and provides the `route` decorator, which is the hallmakr of the Flask
-API.
+The primary application classes which ties together routing, configs,
+and the server loop.
 
-It includes a built-in development server based on `socket` for
-immediate use.
+The ``Scaffold`` class exposes the routing decorators and URL rule
+registration. The ``App`` extends the base scaffold with configuration,
+JSON support, and response construction.
+
+Miroslava provides a lightweight development server that accepts TCP
+connections, parses HTTP requests into ``Request`` objects, applies
+routing, and emits ``Response`` objects with minimal dependencies.
 """
 
 from __future__ import annotations
 
+import mimetypes
 import os
+import socket
 import sys
+import threading
 import typing as t
+from collections.abc import Mapping
+from datetime import datetime
+from http import HTTPStatus
+from urllib.parse import unquote
 
+from miroslava.globals import AppContext
+from miroslava.globals import RequestContext
 from miroslava.utils import DefaultJSONProvider
 from miroslava.utils import get_root_path
+from miroslava.wrappers import Request
 from miroslava.wrappers import Response
 
 if t.TYPE_CHECKING:
-    from collections.abc import Mapping
     from collections.abc import Sequence
 
     from miroslava.wrappers import Headers
 
-type ResponseValue = (
-    "Response" | str | bytes | list[t.Any] | Mapping[str, t.Any]
-)
+type Map = dict[str, dict[str, t.Any]]
 type HeaderValue = str | list[str] | tuple[str, ...]
 type HeadersValue = (
     "Headers" | Mapping[str, HeaderValue] | Sequence[tuple[str, HeaderValue]]
 )
+type ResponseValue = Response | str | bytes | list[t.Any] | Mapping[str, t.Any]
 type ResponseReturnValue = (
     ResponseValue
     | tuple[ResponseValue, HeadersValue]
@@ -55,20 +65,13 @@ class Scaffold:
     :param import_name: Usually the name of the module where this
         object is defined.
     :param static_folder: Path to a folder of static files to serve,
-        defaults to `None`.
+        defaults to ``static``.
     :param static_url_path: URL prefix for the static route, defaults
-        to `None`.
+        to ``None``.
     :param template_folder: Path to a folder containing template files,
-        defaults to `None`.
+        defaults to ``templates``.
     :param root_path: Relative path to the static, template, and the
-        resources directories, defaults to `None`.
-
-    .. note::
-
-        This class is supposed to be extended to add more
-        functionality. However, there's absolutely no need for having
-        this base class, but for the sake of simplicity, I'm separating
-        it from rest of the implementation.
+        resources directories, defaults to ``None``.
     """
 
     name: str
@@ -123,40 +126,83 @@ class Scaffold:
     def get(
         self, rule: str, **options: t.Any
     ) -> t.Callable[[T_route], T_route]:
-        """Route `GET` methods."""
-        return self._method_route("GET", rule, **options)
+        """Route ``GET`` methods."""
+        return self._method_route("GET", rule, options)
 
     def post(
         self, rule: str, **options: t.Any
     ) -> t.Callable[[T_route], T_route]:
-        """Route `POST` methods."""
-        return self._method_route("POST", rule, **options)
+        """Route ``POST`` methods."""
+        return self._method_route("POST", rule, options)
 
     def put(
         self, rule: str, **options: t.Any
     ) -> t.Callable[[T_route], T_route]:
-        """Route `PUT` methods."""
-        return self._method_route("PUT", rule, **options)
+        """Route ``PUT`` methods."""
+        return self._method_route("PUT", rule, options)
 
     def delete(
         self, rule: str, **options: t.Any
     ) -> t.Callable[[T_route], T_route]:
-        """Route `DELETE` methods."""
-        return self._method_route("DELETE", rule, **options)
+        """Route ``DELETE`` methods."""
+        return self._method_route("DELETE", rule, options)
 
     def patch(
         self, rule: str, **options: t.Any
     ) -> t.Callable[[T_route], T_route]:
-        """Route `PATCH` methods."""
-        return self._method_route("PATCH", rule, **options)
+        """Route ``PATCH`` methods."""
+        return self._method_route("PATCH", rule, options)
+
+    def add_url_rule(
+        self,
+        rule: str,
+        endpoint: str | None = None,
+        view_func: RouteCallable | None = None,
+        provide_automatic_options: bool | None = None,
+        **options: t.Any,
+    ) -> None:
+        """Register a rule for routing incoming requests and building
+        URLs.
+
+        :param rule: URL rule string.
+        :param endpoint: The endpoint name to associate the rule and a
+            view function, defaults to ``None``.
+        :param view_func: Function to associate with the endpoint
+            name, defaults to ``None``.
+        :param provide_automatic_options: Ignored in this case, have
+            intentionally defaulted to ``None``.
+        """
+        raise NotImplementedError
 
 
 class App(Scaffold):
-    """Base application object which implements a WSGI application."""
+    """Base application object which implements a WSGI application.
+
+    :param import_name: Name of the application package.
+    :param static_url_path:  URL prefix for the static route, defaults
+        to ``None``.
+    :param static_folder: Path to a folder of static files to serve,
+        defaults to ``static``.
+    :param static_host: Host to use for adding static routes, defaults
+        to ``None``.
+    :param host_matching: Set the ``host_matching`` attribute, defaults
+        to ``False``.
+    :param subdomain_matching: Consider a subdomain when matching
+        routes, defaults to ``False``.
+    :param template_folder: Path to the folder containing templates,
+        defaults to ``templates``.
+    :param instance_path: Alternative instance path to the application,
+        defaults to ``None``.
+    :param instance_relative_config: If ``True``, use relative instance
+        path instead of the application path, defaults to ``False``.
+    :param root_path: Path to the root of application files, defaults
+        to ``None``.
+    """
 
     json_provider_class: type[DefaultJSONProvider] = DefaultJSONProvider
-    default_config: t.ClassVar[dict[str, t.Any]] = {}
-    response_class: type[Response] = Response
+    default_config: t.ClassVar[dict[str, t.Any]]
+    url_map: Map
+    response_class: type[Response]
 
     def __init__(
         self,
@@ -181,10 +227,12 @@ class App(Scaffold):
         )
         self.instance_path = instance_path
         self.config = self.make_config(instance_relative_config)
-        self.json: DefaultJSONProvider = self.json_provider_class
+        self.json = self.json_provider_class()
         self.subdomain_matching = subdomain_matching
         self.static_host = static_host
         self.host_matching = host_matching
+        self.url_map = {}
+        self.response_class: type[Response] = Response
 
     @property
     def name(self) -> str:
@@ -224,8 +272,63 @@ class App(Scaffold):
         methods = {method.upper() for method in methods}
         if provide_automatic_options is None and "OPTIONS" not in methods:
             provide_automatic_options = True
+        self.url_map[rule] = {"endpoint": endpoint, "methods": methods}
         if view_func is not None:
             self.view_functions[endpoint] = view_func
+
+    def make_response(self, rv: ResponseReturnValue) -> Response:
+        """Convert a view return value into a ``Response`` instance.
+
+        :param rv: Return value from a view function.
+        :raises TypeError: If the return value shape cannot be
+            understood.
+        """
+        status: int | str | HTTPStatus | None = None
+        headers: HeadersValue | None = None
+        body: ResponseValue = rv
+        if isinstance(rv, tuple):
+            if len(rv) == 3:
+                body, status, headers = rv
+            elif len(rv) == 2:
+                body, second = rv
+                if isinstance(second, (int, str, HTTPStatus)):
+                    status = second
+                else:
+                    headers = second
+            else:
+                raise TypeError("A response tuple must be of length 2 or 3")
+        if isinstance(body, self.response_class):
+            response = body
+            if status is not None:
+                response.status_code, response.status_phrase = (
+                    response._parse_status(status)
+                )
+        elif isinstance(body, (dict, list)):
+            response = self.json.response(body)
+            if status is not None:
+                response.status_code, response.status_phrase = (
+                    response._parse_status(status)
+                )
+        elif isinstance(body, (str, bytes)):
+            response = self.response_class(body, status=status or 200)
+        else:
+            response = self.response_class(str(body), status=status or 200)
+        if headers:
+            if isinstance(headers, Mapping):
+                for key, value in headers.items():
+                    response.headers[key] = (
+                        ", ".join(value)
+                        if isinstance(value, (list, tuple))
+                        else value
+                    )
+            else:
+                for key, value in headers:
+                    response.headers[key] = (
+                        ", ".join(value)
+                        if isinstance(value, (list, tuple))
+                        else value
+                    )
+        return response
 
     def make_config(self, instance_relative: bool = False) -> dict[str, t.Any]:
         """Make configuration to be used by the instance."""
@@ -247,6 +350,319 @@ class App(Scaffold):
 
 
 class Miroslava(App):
-    """Main class which implements a WSGI application."""
+    """Main class which implements a WSGI application.
 
-    pass
+    :param import_name: Name of the application package.
+    :param static_url_path:  URL prefix for the static route, defaults
+        to ``None``.
+    :param static_folder: Path to a folder of static files to serve,
+        defaults to ``static``.
+    :param static_host: Host to use for adding static routes, defaults
+        to ``None``.
+    :param host_matching: Set the ``host_matching`` attribute, defaults
+        to ``False``.
+    :param subdomain_matching: Consider a subdomain when matching
+        routes, defaults to ``False``.
+    :param template_folder: Path to the folder containing templates,
+        defaults to ``templates``.
+    :param instance_path: Alternative instance path to the application,
+        defaults to ``None``.
+    :param instance_relative_config: If ``True``, use relative instance
+        path instead of the application path, defaults to ``False``.
+    :param root_path: Path to the root of application files, defaults
+        to ``None``.
+    """
+
+    default_config: t.ClassVar[dict[str, t.Any]] = {
+        "DEBUG": False,
+        "APPLICATION_ROOT": "/",
+        "SERVER_NAME": None,
+    }
+    request_class: type[Request] = Request
+    response_class: type[Response] = Response
+
+    def __init__(
+        self,
+        import_name: str,
+        static_url_path: str | None = None,
+        static_folder: str | os.PathLike[str] | None = "static",
+        static_host: str | None = None,
+        host_matching: bool = False,
+        subdomain_matching: bool = False,
+        template_folder: str | os.PathLike[str] | None = "templates",
+        instance_path: str | None = None,
+        instance_relative_config: bool = False,
+        root_path: str | None = None,
+    ) -> None:
+        """Initialise the application instance."""
+        super().__init__(
+            import_name=import_name,
+            static_url_path=static_url_path,
+            static_folder=static_folder,
+            static_host=static_host,
+            host_matching=host_matching,
+            subdomain_matching=subdomain_matching,
+            template_folder=template_folder,
+            instance_path=instance_path,
+            instance_relative_config=instance_relative_config,
+            root_path=root_path,
+        )
+
+    def run(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        debug: bool | None = None,
+        load_dotenv: bool = False,
+        **options: t.Any,
+    ) -> None:
+        """Run the application on a local development server.
+
+        The method binds a TCP socket, listens for incoming HTTP
+        requests, and delegates each connection to a worker thread.
+
+        :param host: Hostname to bind to; falls back to ``SERVER_NAME``
+            or ``127.0.0.1`` when omitted, defaults to ``None``.
+        :param port: Port for the webserver; defaults to ``9001`` when
+            not provided or derived from ``SERVER_NAME``, defaults
+            to ``None``.
+        :param debug: When ``True``, exceptions print full tracebacks
+            and the debug flag is set in the configuration, defaults
+            to ``None``.
+        :param load_dotenv: Included for API compatibility; unused but
+            retained, defaults to ``False``.
+        """
+        _ = load_dotenv
+        _ = options
+        if debug is not None:
+            self.debug = bool(debug)
+        server_name = self.config.get("SERVER_NAME")
+        sn_host = None
+        sn_port = None
+        if server_name:
+            sn_host, _, sn_port = server_name.partition(":")
+
+        if not host:
+            host = sn_host if sn_host else "127.0.0.1"
+
+        if port or port == 0:
+            port = int(port)
+        elif sn_port:
+            port = int(sn_port)
+        else:
+            port = 9001
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server.bind((host, port))
+        except OSError as err:
+            print(f"Couldn't bind to {host}:{port} due to {err}")
+            return
+        server.listen(5)
+        print(f" * Serving Miroslava app {self.import_name!r}")
+        print(f" * Debug mode: {'on' if debug else 'off'}")
+        print(f" * Running on http://{host}:{port}/\nPress CTRL+C to quit")
+        try:
+            while True:
+                client, addr = server.accept()
+                threading.Thread(
+                    target=self._handle_client,
+                    args=(client, addr),
+                    daemon=True,
+                ).start()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.close()
+
+    def _handle_client(
+        self,
+        client: socket.socket,
+        addr: tuple[str, int],
+    ) -> None:
+        """Handle incoming request by dispatching.
+
+        This method reads the raw request bytes from the socket,
+        constructs a WSGI-style environment mapping, and instantiates a
+        Request object. It then sets up the application and request
+        contexts, dispatches the request to a view function, logs the
+        outcome, and finally sends the resulting Response back to the
+        client. Errors are reported to stdout, and tracebacks are shown
+        when debug mode is enabled.
+
+        :param client: The client socket connection.
+        :param addr: The client address tuple (host, port).
+        """
+        try:
+            buffer = b""
+            while b"\r\n\r\n" not in buffer:
+                chunk = client.recv(1024)
+                if not chunk:
+                    break
+                buffer += chunk
+            if b"\r\n\r\n" not in buffer:
+                return
+            headers_data, body_data = buffer.split(b"\r\n\r\n", 1)
+            environ = self._make_environ(headers_data)
+            cl = environ.get("CONTENT_LENGTH")
+            if cl:
+                length = int(cl)
+                while len(body_data) < length:
+                    chunk = client.recv(1024)
+                    if not chunk:
+                        break
+                    body_data += chunk
+                environ["miroslava.request_body"] = body_data
+
+            request = self.request_class(environ)
+            ctx = RequestContext(self, environ, request=request)
+            app_c = AppContext(self)
+
+            app_c.push()
+            ctx.push()
+            try:
+                response = self.dispatch_request(request)
+                self._log_request(addr, request, response)
+                self._send_response(client, response)
+            finally:
+                ctx.pop()
+                app_c.pop()
+        except Exception as err:
+            print(f"Internal Server Error: {err}")
+            if not self.config["DEBUG"]:
+                import traceback
+
+                traceback.print_exc()
+        finally:
+            client.close()
+
+    def _make_environ(self, header_bytes: bytes) -> dict[str, t.Any]:
+        """Convert raw header bytes into a WSGI-like environment dict.
+
+        The parser extracts the request line, path, query string, and
+        maps headers to CGI-style keys. Content-Length and Content-Type
+        are stored without the HTTP_ prefix while all other headers are
+        namespaced with HTTP_ to mirror the WSGI standard.
+
+        :param header_bytes: Raw bytes containing the request line and
+            header block.
+        """
+        header_text = header_bytes.decode("utf-8", "ignore")
+        lines = header_text.split("\r\n")
+        request_line = lines[0].split()
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": "/",
+            "QUERY_STRING": "",
+            "SERVER_NAME": "localhost",
+            "SERVER_PORT": "9001",
+            "wsgi.url_scheme": "http",
+        }
+        if len(request_line) >= 2:
+            environ["REQUEST_METHOD"] = request_line[0]
+            path = request_line[1]
+            if "?" in path:
+                path, query = path.split("?", 1)
+                environ["QUERY_STRING"] = query
+            environ["PATH_INFO"] = unquote(path)
+        for line in lines[1:]:
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                key = key.upper().replace("-", "_")
+                if key in ("CONTENT_LENGTH", "CONTENT_TYPE"):
+                    environ[key] = value.strip()
+                else:
+                    environ[f"HTTP_{key}"] = value.strip()
+        return environ
+
+    def dispatch_request(self, req: Request) -> Response:
+        """Match route and return a response object.
+
+        The dispatcher matches the incoming path against the url_map,
+        validates the HTTP method, and invokes the registered view
+        function. View return values are normalised with make_response so
+        tuples, mappings, and Response objects are handled consistently.
+        Static file requests containing a period in the path are served
+        from the configured static_folder. Missing routes yield a 404
+        response.
+
+        :param req: The request object to dispatch.
+        :return: A Response object.
+        """
+        if "." in req.path and not req.path.endswith("/"):
+            return self._serve_static(req.path)
+        if req.path in self.url_map:
+            rule_data = self.url_map[req.path]
+            allowed_methods = rule_data["methods"]
+            if req.method not in allowed_methods:
+                return self.response_class("Method Not Allowed", status=405)
+            endpoint = rule_data["endpoint"]
+            view_func = self.view_functions[endpoint]
+            response_value = view_func()
+            return self.make_response(response_value)
+        return self.response_class("Not Found", status=404)
+
+    def _serve_static(self, path: str) -> Response:
+        """Serve static files.
+
+        :param path: The path to the static file including the leading
+            slash.
+        :return: A Response object containing the file data or a 404
+            response when the file is missing.
+        """
+        safe_path = path.lstrip("/")
+        static_prefix = (self.static_url_path or "static").lstrip("/")
+        if safe_path.startswith((f"{static_prefix}/", "static/")):
+            safe_path = safe_path.split("/", 1)[1]
+        full_path = (
+            os.path.join(self.static_folder or "", safe_path)
+            if self.static_folder
+            else safe_path
+        )
+        if os.path.exists(full_path) and os.path.isfile(full_path):
+            with open(full_path, "rb") as f:
+                data = f.read()
+            mimetype, _ = mimetypes.guess_type(full_path)
+            return self.response_class(
+                data, mimetype=mimetype or "application/octet-stream"
+            )
+        return self.response_class("Not Found", status=404)
+
+    def _log_request(
+        self,
+        addr: tuple[str, int],
+        req: Request,
+        response: Response,
+    ) -> None:
+        """Log the incoming request details to stdout.
+
+        The format mimics the default access logs provided by Werkzeug:
+        `host - - [Date] "METHOD Path HTTP/1.1" Status -`
+
+        :param addr: The client address tuple (host, port).
+        :param req: The request object.
+        :param response: The response object.
+        """
+        now = datetime.now().strftime("%d/%b/%Y %H:%M:%S")
+        print(
+            f'{addr[0]} - - [{now}] "{req.method} {req.path} '
+            f'{req.environ.get("SERVER_PROTOCOL", "HTTP/1.1")}" '
+            f"{response.status_code} -"
+        )
+
+    def _send_response(self, client: socket.socket, response: Response) -> None:
+        """Send a Response object to the client socket.
+
+        :param client: The client socket.
+        :param response: The response object to send.
+        """
+        status_line = f"HTTP/1.1 {response.status}\r\n"
+        headers = "".join(f"{k}: {v}\r\n" for k, v in response.headers.items())
+        full_response = (
+            status_line.encode("latin-1")
+            + headers.encode("latin-1")
+            + f"Content-Length: {len(response.data)}\r\n\r\n".encode("latin-1")
+            + response.data
+        )
+        client.sendall(full_response)

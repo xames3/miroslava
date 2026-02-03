@@ -4,7 +4,7 @@ Miroslava's Utilities
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 27 January, 2026
-Last updated on: 01 February, 2026
+Last updated on: 02 February, 2026
 
 This module provides small helper functions that are used throughout
 the project. It includes some JSON serialisation helpers, a simple
@@ -105,7 +105,10 @@ class DefaultJSONProvider:
         return Response(self.dumps(obj), mimetype=self.mimetype)
 
 
-jsonify = m("miroslava.json.provider")(lambda: DefaultJSONProvider().response)
+@m("miroslava.json.provider")
+def jsonify(*args: t.Any, **kwargs: t.Any) -> Response:
+    """Create a JSON response using the default provider."""
+    return DefaultJSONProvider().response(*args, **kwargs)
 
 
 @m("miroslava.templating")
