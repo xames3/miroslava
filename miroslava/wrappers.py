@@ -4,7 +4,7 @@ Miroslava's Wrappers
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 26 January, 2026
-Last updated on: 02 February, 2026
+Last updated on: 03 February, 2026
 
 This module provides the public ``Request`` and ``Response`` classes.
 
@@ -38,6 +38,72 @@ if t.TYPE_CHECKING:
 
 type WSGIEnvironment = dict[str, t.Any]
 
+HTTP_STATUS_CODES: dict[int, str] = {
+    100: "Continue",
+    101: "Switching Protocols",
+    102: "Processing",
+    103: "Early Hints",
+    200: "OK",
+    201: "Created",
+    202: "Accepted",
+    203: "Non Authoritative Information",
+    204: "No Content",
+    205: "Reset Content",
+    206: "Partial Content",
+    207: "Multi Status",
+    208: "Already Reported",
+    226: "IM Used",
+    300: "Multiple Choices",
+    301: "Moved Permanently",
+    302: "Found",
+    303: "See Other",
+    304: "Not Modified",
+    305: "Use Proxy",
+    306: "Switch Proxy",
+    307: "Temporary Redirect",
+    308: "Permanent Redirect",
+    400: "Bad Request",
+    401: "Unauthorized",
+    402: "Payment Required",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    406: "Not Acceptable",
+    407: "Proxy Authentication Required",
+    408: "Request Timeout",
+    409: "Conflict",
+    410: "Gone",
+    411: "Length Required",
+    412: "Precondition Failed",
+    413: "Request Entity Too Large",
+    414: "Request URI Too Long",
+    415: "Unsupported Media Type",
+    416: "Requested Range Not Satisfiable",
+    417: "Expectation Failed",
+    418: "I'm a teapot",
+    421: "Misdirected Request",
+    422: "Unprocessable Entity",
+    423: "Locked",
+    424: "Failed Dependency",
+    425: "Too Early",
+    426: "Upgrade Required",
+    428: "Precondition Required",
+    429: "Too Many Requests",
+    431: "Request Header Fields Too Large",
+    449: "Retry With",
+    451: "Unavailable For Legal Reasons",
+    500: "Internal Server Error",
+    501: "Not Implemented",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+    505: "HTTP Version Not Supported",
+    506: "Variant Also Negotiates",
+    507: "Insufficient Storage",
+    508: "Loop Detected",
+    510: "Not Extended",
+    511: "Network Authentication Failed",
+}
 EnvironHeaders = Headers
 
 
@@ -55,7 +121,7 @@ class Request:
         the active request.
     """
 
-    parameter_storage_class: MultiDict[str, str]
+    parameter_storage_class: type[MultiDict[str, str]] = MultiDict
 
     def __init__(self, environ: WSGIEnvironment) -> None:
         """Initialise a request object from the WSGI environment."""
@@ -184,7 +250,7 @@ class Response:
     """
 
     default_status: t.ClassVar[int] = 200
-    default_mimetype: t.ClassVar[str | None] = "text/plain"
+    default_mimetype: t.ClassVar[str | None] = "text/html"
     headers: Headers
     response: Iterable[str] | Iterable[bytes]
 
@@ -213,13 +279,16 @@ class Response:
         if content_type:
             self.headers["Content-Type"] = content_type
         if response is None:
-            self.response: bytes = b""
+            self.response = [b""]
         elif isinstance(response, str):
-            self.response = response.encode()
+            self.response = [response.encode()]
         elif isinstance(response, bytes):
-            self.response = response
+            self.response = [response]
         else:
-            self.response = b"".join(response)
+            self.response = [
+                chunk if isinstance(chunk, bytes) else str(chunk).encode()
+                for chunk in response
+            ]
         self.direct_passthrough = direct_passthrough
 
     def __repr__(self) -> str:
@@ -251,30 +320,33 @@ class Response:
     def _clean_status(value: int | str | HTTPStatus) -> tuple[str, int]:
         """Normalise status inputs to a numeric code and phrase."""
         if isinstance(value, HTTPStatus):
-            return value.phrase, value.value
+            return f"{value.value} {value.phrase}", value.value
         if isinstance(value, int):
             try:
                 status = HTTPStatus(value)
             except ValueError:
-                return "", value
+                return str(value), value
             else:
-                return status.phrase, value
+                return f"{value} {status.phrase}", value
         if isinstance(value, str):
             parts = value.split(" ", 1)
             try:
                 status_code = int(parts[0])
-                if len(parts) > 1:
-                    return parts[1], status_code
-                try:
-                    status = HTTPStatus(status_code)
-                except ValueError:
-                    return "", status_code
-                else:
-                    return status.phrase, status_code
-            except ValueError as verr:
+                phrase = parts[1] if len(parts) > 1 else ""
+                if not phrase:
+                    try:
+                        phrase = HTTPStatus(status_code).phrase
+                    except ValueError:
+                        phrase = ""
+                status = f"{status_code} {phrase}".strip()
+            except ValueError as err:
                 raise ValueError(
                     "Status must start with an integer code"
-                ) from verr
+                ) from err
+            else:
+                return (
+                    f"{status_code} {HTTP_STATUS_CODES[status_code].upper()}"
+                ), status_code
         raise TypeError("Invalid status value type")
 
     def iter_encoded(self) -> Iterator[bytes]:
@@ -295,9 +367,9 @@ class Response:
     def set_data(self, value: str | bytes) -> None:
         """Replace the payload data on the response."""
         if isinstance(value, str):
-            self.response = value.encode()
-            return
-        self.response = [value]
+            self.response = [value.encode()]
+        else:
+            self.response = [value]
         self.headers["Content-Length"] = str(len(value))
 
     data = property(get_data, set_data)
