@@ -4,10 +4,14 @@ Miroslava
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 26 January, 2026
-Last updated on: 31 January, 2026
+Last updated on: 03 February, 2026
 
-Miroslava is a lightweight, risky, and non-production ready WSGI web
-application microframework designed to mimic Flask's API structures.
+Miroslava is a ultra-lightweight, risky, and non-production ready WSGI
+(micro) web framework modelled after ``Flask`` and ``Werkzeug``.
+
+This reinactment of ``Flask`` is something I wrote to challenge myself
+and a means to teach how a web framework works behind the scenes to my
+students.
 """
 
 from __future__ import annotations
@@ -22,4 +26,4 @@ from miroslava.utils import render_template as render_template
 from miroslava.wrappers import Request as Request
 from miroslava.wrappers import Response as Response
 
-version: str = "26.1.2026"
+version: str = "01.02.2026"
