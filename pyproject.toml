@@ -52,6 +52,7 @@ extend-exclude = [
   "archive",
   "build",
   "dist",
+  "examples",
 ]
 
 [tool.ruff.lint]
