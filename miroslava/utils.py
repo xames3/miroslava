@@ -4,7 +4,7 @@ Miroslava's Utilities
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 27 January, 2026
-Last updated on: 02 February, 2026
+Last updated on: 04 February, 2026
 
 This module provides small helper functions that are used throughout
 the project. It includes some JSON serialisation helpers, a simple
@@ -321,3 +321,22 @@ def abort(
         else:
             response = current_app.make_response((body, code))
     raise HTTPExceptionError(response)
+
+
+def show_server_banner(
+    debug: bool, app_import_path: str | None, **options: t.Any
+) -> None:
+    """Show startup message when running the main application."""
+    message = ""
+    if app_import_path is not None:
+        message += f" * Serving Miroslava app {app_import_path!r}\n"
+    if options:
+        host = options.get("host", "127.0.0.1")
+        port = options.get("port", 90001)
+        info = f" * Running on http://{host}:{port}/\nPress CTRL+C to quit\n"
+    if debug is not None:
+        message += f" * Debug mode: {'on' if debug else 'off'}\n"
+        message += info
+        if debug:
+            message += " * Debugger is active!\n * Debugger PIN: 299-792-458"
+    print(message)
