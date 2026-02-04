@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
 import socket
 import sys
 import threading
@@ -35,15 +36,16 @@ from miroslava.globals import AppContext
 from miroslava.globals import RequestContext
 from miroslava.utils import DefaultJSONProvider
 from miroslava.utils import get_root_path
+from miroslava.utils import set_module as m
 from miroslava.wrappers import Request
 from miroslava.wrappers import Response
 
 if t.TYPE_CHECKING:
+    from collections.abc import Iterable
     from collections.abc import Sequence
 
     from miroslava.wrappers import Headers
 
-type Map = dict[str, dict[str, t.Any]]
 type HeaderValue = str | list[str] | tuple[str, ...]
 type HeadersValue = (
     "Headers" | Mapping[str, HeaderValue] | Sequence[tuple[str, HeaderValue]]
@@ -58,6 +60,76 @@ type ResponseReturnValue = (
 type WSGIEnvironment = dict[str, t.Any]
 RouteCallable = t.Callable[..., ResponseReturnValue]
 T_route = t.TypeVar("T_route", bound=RouteCallable)
+
+
+@m("miroslava.twerkzeug.routing.rules")
+class Rule:
+    """Represent a single URL mapping.
+
+    The rule stores the original pattern string, any default values for
+    variable parts, compiled regular expression for dynamic segments,
+    and converters that coerce matched strings into typed Python
+    objects.
+
+    :param string: Normal URL string.
+    :param defaults: Optional dictionary with defaults for other rules
+        with same endpoints, defaults to ``None``.
+    :param methods: Sequence of http methods this rule applied to,
+        defaults to ``None``.
+    :param endpoint: Endpoint for this rule, defaults to ``None``.
+    """
+
+    def __init__(
+        self,
+        string: str,
+        defaults: Mapping[str, t.Any] | None = None,
+        methods: Iterable[str] | None = None,
+        endpoint: str | None = None,
+    ) -> None:
+        """Initialise a rule with URL string."""
+        if not string.startswith("/"):
+            raise ValueError(f"URL rule {string!r} must start with a slash")
+        self.rule = string
+        self.endpoint = endpoint or string
+        self.methods = set(methods or [])
+        self.defaults = dict(defaults or {})
+
+    def __repr__(self) -> str:
+        """Human-readable representation of the rule object."""
+        methods = ", ".join(sorted(self.methods)) if self.methods else ""
+        return f"<Rule {self.rule!r} ({methods}) -> {self.endpoint}>"
+
+
+@m("miroslava.twerkzeug.routing.map")
+class Map:
+    """Container class for storing all the URL rules.
+
+    The map maintains insertion order, exposes iteration, and supports
+    length queries to mirror the behaviour expected by the dispatcher.
+
+    :param rules: Sequence of URL rules for this map, defaults to
+        ``None``.
+    """
+
+    def __init__(self, rules: Iterable[Rule] | None = None) -> None:
+        """Initialise mapping with some rules."""
+        self._rules: Iterable[Rule] = rules or []
+
+    def __repr__(self) -> str:
+        """Human-readable representation of mapping object."""
+        return f"<Map {len(self._rules)} rules>"
+
+    def __iter__(self) -> t.Iterator[Rule]:
+        """Iterate over all rules of an endpoint."""
+        return iter(self._rules)
+
+    def __len__(self) -> int:
+        """Return count of rules."""
+        return len(self._rules)
+
+    def add(self, rule: Rule) -> None:
+        """Add new rule to the map."""
+        self._rules.append(rule)
 
 
 class Scaffold:
@@ -170,8 +242,8 @@ class Scaffold:
             view function, defaults to ``None``.
         :param view_func: Function to associate with the endpoint
             name, defaults to ``None``.
-        :param provide_automatic_options: Ignored in this case, have
-            intentionally defaulted to ``None``.
+        :param provide_automatic_options: Add ``OPTIONS`` method,
+            defaults to ``None``.
         """
         raise NotImplementedError
 
@@ -202,7 +274,8 @@ class App(Scaffold):
 
     json_provider_class: type[DefaultJSONProvider] = DefaultJSONProvider
     default_config: t.ClassVar[dict[str, t.Any]]
-    url_map: Map
+    url_rule_class: Rule = Rule
+    url_map_class: Map = Map
     response_class: type[Response]
 
     def __init__(
@@ -232,7 +305,7 @@ class App(Scaffold):
         self.subdomain_matching = subdomain_matching
         self.static_host = static_host
         self.host_matching = host_matching
-        self.url_map = {}
+        self.url_map = self.url_map_class()
         self.response_class: type[Response] = Response
 
     @property
@@ -261,19 +334,44 @@ class App(Scaffold):
             view function, defaults to `None`.
         :param view_func: Function to associate with the endpoint
             name, defaults to `None`.
-        :param provide_automatic_options: Ignored in this case, have
-            intentionally defaulted to `None`.
+        :param provide_automatic_options: Add ``OPTIONS`` method,
+            defaults to ``None``.
         """
+        converters: dict[str, t.Callable[[str], t.Any]] = {}
         if endpoint is None:
             endpoint = view_func.__name__ or rule
-        options["endpoint"] = endpoint
         methods = options.pop("methods", None)
         if methods is None:
             methods = ("GET",)
         methods = {method.upper() for method in methods}
         if provide_automatic_options is None and "OPTIONS" not in methods:
             provide_automatic_options = True
-        self.url_map[rule] = {"endpoint": endpoint, "methods": methods}
+        defaults = options.pop("defaults", {}) or {}
+        pattern = None
+        if "<" in rule and ">" in rule:
+            type_map = {"int": int, None: str}
+
+            def _replace(match: re.Match[str]) -> str:
+                type_name = match.group("type")
+                name = match.group("name")
+                converters[name] = type_map.get(type_name, str)
+                if type_name == "int":
+                    return f"(?P<{name}>\\d+)"
+                return f"(?P<{name}>[^/]+)"
+
+            pattern = re.compile(
+                "^"
+                + re.sub(
+                    r"<(?:(?P<type>[a-zA-Z_][a-zA-Z0-9_]*)?:)?(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)>",
+                    _replace,
+                    rule,
+                )
+                + "$"
+            )
+        rule_obj = self.url_rule_class(rule, defaults, methods, endpoint)
+        rule_obj.pattern = pattern
+        rule_obj.converters = converters
+        self.url_map.add(rule_obj)
         if view_func is not None:
             self.view_functions[endpoint] = view_func
 
@@ -341,7 +439,7 @@ class App(Scaffold):
 
     @property
     def debug(self) -> bool:
-        """Return `True` if the app is running in debug mode."""
+        """Return ``True`` if the app is running in debug mode."""
         return self.config["DEBUG"]
 
     @debug.setter
@@ -531,7 +629,7 @@ class Miroslava(App):
                 app_ctx.pop()
         except Exception as err:
             print(f"Internal Server Error: {err}")
-            if not self.config["DEBUG"]:
+            if self.config["DEBUG"]:
                 import traceback
 
                 traceback.print_exc()
@@ -597,15 +695,34 @@ class Miroslava(App):
         """
         if "." in request.path and not request.path.endswith("/"):
             return self.send_static_file(request.path)
-        if request.path in self.url_map:
-            rule_data = self.url_map[request.path]
-            allowed_methods = rule_data["methods"]
-            if request.method not in allowed_methods:
+        for rule in self.url_map:
+            if rule.pattern is not None:
+                continue
+            if request.path != rule.rule:
+                continue
+            if request.method not in rule.methods:
                 return self.response_class("Method Not Allowed", status=405)
-            endpoint = rule_data["endpoint"]
-            view_func = self.view_functions[endpoint]
-            response_value = view_func()
-            return self.make_response(response_value)
+            view_func = self.view_functions[rule.endpoint]
+            kwargs = dict(rule.defaults)
+            rv = view_func(**kwargs)
+            return self.make_response(rv)
+        for rule in self.url_map:
+            if rule.pattern is None:
+                continue
+            match = rule.pattern.match(request.path)
+            if not match:
+                continue
+            if request.method not in rule.methods:
+                return self.response_class("Method Not Allowed", status=405)
+            view_func = self.view_functions[rule.endpoint]
+            kwargs = dict(rule.defaults)
+            for key, value in match.groupdict().items():
+                try:
+                    kwargs[key] = rule.converters.get(key, str)(value)
+                except Exception:
+                    return self.response_class("Not Found", status=404)
+            rv = view_func(**kwargs)
+            return self.make_response(rv)
         return self.response_class("Not Found", status=404)
 
     def send_static_file(self, path: str) -> Response:
