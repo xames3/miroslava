@@ -18,14 +18,11 @@ import typing as t
 from collections.abc import Iterable
 from collections.abc import Mapping
 
-from miroslava.utils import set_module as m
-
 K = t.TypeVar("K")
 V = t.TypeVar("V")
 T = t.TypeVar("T")
 
 
-@m("miroslava.twerkzeug.datastructures.structures")
 class MultiDict(dict[K, V]):
     """A dictionary variant that stores multiple values for each key.
 
@@ -137,7 +134,6 @@ class MultiDict(dict[K, V]):
                 yield key, values[0]
 
 
-@m("miroslava.twerkzeug.datastructures.headers")
 class Headers(MultiDict[str, str]):
     """HTTP header container that stores some header."""
 

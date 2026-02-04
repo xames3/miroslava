@@ -27,7 +27,6 @@ from urllib.parse import parse_qsl
 
 from miroslava.datastructures import Headers
 from miroslava.datastructures import MultiDict
-from miroslava.utils import _get_server
 from miroslava.utils import get_content_type
 from miroslava.utils import get_current_url
 
@@ -105,6 +104,14 @@ HTTP_STATUS_CODES: dict[int, str] = {
     511: "Network Authentication Failed",
 }
 EnvironHeaders = Headers
+
+
+def _get_server(environ: WSGIEnvironment) -> tuple[str, int] | None:
+    """Return value of host and port details from environment."""
+    name = environ.get("SERVER_NAME")
+    if name is None:
+        return None
+    return name, int(environ.get("SERVER_PORT", 9001))
 
 
 class Request:

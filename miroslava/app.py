@@ -35,13 +35,14 @@ from urllib.parse import unquote
 from miroslava.globals import AppContext
 from miroslava.globals import RequestContext
 from miroslava.utils import DefaultJSONProvider
+from miroslava.utils import HTTPExceptionError
+from miroslava.utils import Map
+from miroslava.utils import Rule
 from miroslava.utils import get_root_path
-from miroslava.utils import set_module as m
 from miroslava.wrappers import Request
 from miroslava.wrappers import Response
 
 if t.TYPE_CHECKING:
-    from collections.abc import Iterable
     from collections.abc import Sequence
 
     from miroslava.wrappers import Headers
@@ -60,76 +61,6 @@ type ResponseReturnValue = (
 type WSGIEnvironment = dict[str, t.Any]
 RouteCallable = t.Callable[..., ResponseReturnValue]
 T_route = t.TypeVar("T_route", bound=RouteCallable)
-
-
-@m("miroslava.twerkzeug.routing.rules")
-class Rule:
-    """Represent a single URL mapping.
-
-    The rule stores the original pattern string, any default values for
-    variable parts, compiled regular expression for dynamic segments,
-    and converters that coerce matched strings into typed Python
-    objects.
-
-    :param string: Normal URL string.
-    :param defaults: Optional dictionary with defaults for other rules
-        with same endpoints, defaults to ``None``.
-    :param methods: Sequence of http methods this rule applied to,
-        defaults to ``None``.
-    :param endpoint: Endpoint for this rule, defaults to ``None``.
-    """
-
-    def __init__(
-        self,
-        string: str,
-        defaults: Mapping[str, t.Any] | None = None,
-        methods: Iterable[str] | None = None,
-        endpoint: str | None = None,
-    ) -> None:
-        """Initialise a rule with URL string."""
-        if not string.startswith("/"):
-            raise ValueError(f"URL rule {string!r} must start with a slash")
-        self.rule = string
-        self.endpoint = endpoint or string
-        self.methods = set(methods or [])
-        self.defaults = dict(defaults or {})
-
-    def __repr__(self) -> str:
-        """Human-readable representation of the rule object."""
-        methods = ", ".join(sorted(self.methods)) if self.methods else ""
-        return f"<Rule {self.rule!r} ({methods}) -> {self.endpoint}>"
-
-
-@m("miroslava.twerkzeug.routing.map")
-class Map:
-    """Container class for storing all the URL rules.
-
-    The map maintains insertion order, exposes iteration, and supports
-    length queries to mirror the behaviour expected by the dispatcher.
-
-    :param rules: Sequence of URL rules for this map, defaults to
-        ``None``.
-    """
-
-    def __init__(self, rules: Iterable[Rule] | None = None) -> None:
-        """Initialise mapping with some rules."""
-        self._rules: Iterable[Rule] = rules or []
-
-    def __repr__(self) -> str:
-        """Human-readable representation of mapping object."""
-        return f"<Map {len(self._rules)} rules>"
-
-    def __iter__(self) -> t.Iterator[Rule]:
-        """Iterate over all rules of an endpoint."""
-        return iter(self._rules)
-
-    def __len__(self) -> int:
-        """Return count of rules."""
-        return len(self._rules)
-
-    def add(self, rule: Rule) -> None:
-        """Add new rule to the map."""
-        self._rules.append(rule)
 
 
 class Scaffold:
@@ -559,7 +490,7 @@ class Miroslava(App):
             print(f"Couldn't bind to {host}:{port} due to {err}")
             return
         server.listen(5)
-        print(f" * Serving Miroslava app {self.import_name!r}")
+        print(f" * Serving Miroslava app {self.name!r}")
         print(f" * Debug mode: {'on' if debug else 'off'}")
         print(f" * Running on http://{host}:{port}/\nPress CTRL+C to quit")
         try:
@@ -704,7 +635,10 @@ class Miroslava(App):
                 return self.response_class("Method Not Allowed", status=405)
             view_func = self.view_functions[rule.endpoint]
             kwargs = dict(rule.defaults)
-            rv = view_func(**kwargs)
+            try:
+                rv = view_func(**kwargs)
+            except HTTPExceptionError as err:
+                return err.response
             return self.make_response(rv)
         for rule in self.url_map:
             if rule.pattern is None:
@@ -721,7 +655,10 @@ class Miroslava(App):
                     kwargs[key] = rule.converters.get(key, str)(value)
                 except Exception:
                     return self.response_class("Not Found", status=404)
-            rv = view_func(**kwargs)
+            try:
+                rv = view_func(**kwargs)
+            except HTTPExceptionError as err:
+                return err.response
             return self.make_response(rv)
         return self.response_class("Not Found", status=404)
 
