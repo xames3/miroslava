@@ -36,8 +36,6 @@ from contextvars import ContextVar
 from contextvars import Token
 from operator import attrgetter
 
-from miroslava.utils import set_module as m
-
 if t.TYPE_CHECKING:
     from collections.abc import Iterator
     from types import TracebackType
@@ -49,7 +47,6 @@ T = t.TypeVar("T")
 type SessionMixin = dict[str, t.Any]
 
 
-@m("miroslava.ctx")
 class _AppCtxGlobals:
     """Namespace object that stores arbitrary attributes."""
 
@@ -70,7 +67,6 @@ class _AppCtxGlobals:
         return iter(self.__dict__)
 
 
-@m("miroslava.ctx")
 class AppContext:
     """Application context carrying the app and a user namespace.
 
@@ -113,7 +109,6 @@ class AppContext:
             _cv_app.reset(self._cv_tokens.pop())
 
 
-@m("miroslava.ctx")
 class RequestContext:
     """Request context storing request and session state.
 
@@ -169,13 +164,11 @@ class RequestContext:
             _cv_request.reset(self._cv_tokens.pop())
 
 
-@m("miroslava.twerkzeug.local")
 def _identity[T](o: T) -> T:
     """Return itself."""
     return o
 
 
-@m("miroslava.twerkzeug.local")
 class LocalProxy[T]:
     """Proxy that forwards operations to a context-local object.
 

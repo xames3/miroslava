@@ -21,35 +21,31 @@ import json
 import os
 import sys
 import typing as t
+from http import HTTPStatus
 
 if t.TYPE_CHECKING:
+    from collections.abc import Iterable
+    from collections.abc import Mapping
+    from collections.abc import Sequence
+
+    from miroslava.wrappers import Headers
     from miroslava.wrappers import Response
 
 F = t.TypeVar("F", bound=t.Callable[..., object])
+type HeaderValue = str | list[str] | tuple[str, ...]
+type HeadersValue = (
+    "Headers" | Mapping[str, HeaderValue] | Sequence[tuple[str, HeaderValue]]
+)
 type JSONValue = (
     str | int | float | bool | None | dict[str, t.Any] | list[t.Any]
 )
+type ResponseValue = Response | str | bytes | list[t.Any] | Mapping[str, t.Any]
 type WSGIEnvironment = dict[str, t.Any]
 
 _charset_mimetypes: set[str] = {
     "application/javascript",
     "application/xml",
 }
-
-
-def set_module(module: str | None) -> t.Callable[[F], F]:
-    """Decorator for overriding the ``__module__`` on a callable."""
-
-    def inner(func: F) -> F:
-        """Decorated function."""
-        if module is not None:
-            func.__module__ = module
-        return func
-
-    return inner
-
-
-m = set_module
 
 
 def get_content_type(mimetype: str, charset: str) -> str:
@@ -64,7 +60,6 @@ def get_content_type(mimetype: str, charset: str) -> str:
     return mimetype
 
 
-@m("miroslava.json.provider")
 class DefaultJSONProvider:
     """Base class which provides JSON serialisation."""
 
@@ -105,18 +100,15 @@ class DefaultJSONProvider:
         return Response(self.dumps(obj), mimetype=self.mimetype)
 
 
-@m("miroslava.json.provider")
 def jsonify(*args: t.Any, **kwargs: t.Any) -> Response:
     """Create a JSON response using the default provider."""
     return DefaultJSONProvider().response(*args, **kwargs)
 
 
-@m("miroslava.templating")
 class TemplateNotFoundError(IOError):
     """Error raised when a template file cannot be located on disk."""
 
 
-@m("miroslava.templating")
 def render_template(
     template_name_or_list: str | list[str],
     **context: t.Any,
@@ -168,7 +160,6 @@ def render_template(
     return content
 
 
-@m("miroslava.helpers")
 def get_root_path(import_name: str) -> str:
     """Return the filesystem directory for the given import name.
 
@@ -182,16 +173,6 @@ def get_root_path(import_name: str) -> str:
         return os.getcwd()
 
 
-@m("miroslava.twerkzeug.wsgi")
-def _get_server(environ: WSGIEnvironment) -> tuple[str, int] | None:
-    """Return value of host and port details from environment."""
-    name = environ.get("SERVER_NAME")
-    if name is None:
-        return None
-    return name, int(environ.get("SERVER_PORT", 9001))
-
-
-@m("miroslava.twerkzeugwsgi")
 def get_current_url(
     scheme: str,
     host: str,
@@ -220,3 +201,123 @@ def get_current_url(
     if query_string:
         url.extend(["?", query_string])
     return "".join(url)
+
+
+class Rule:
+    """Represent a single URL mapping.
+
+    The rule stores the original pattern string, any default values for
+    variable parts, compiled regular expression for dynamic segments,
+    and converters that coerce matched strings into typed Python
+    objects.
+
+    :param string: Normal URL string.
+    :param defaults: Optional dictionary with defaults for other rules
+        with same endpoints, defaults to ``None``.
+    :param methods: Sequence of http methods this rule applied to,
+        defaults to ``None``.
+    :param endpoint: Endpoint for this rule, defaults to ``None``.
+    """
+
+    def __init__(
+        self,
+        string: str,
+        defaults: Mapping[str, t.Any] | None = None,
+        methods: Iterable[str] | None = None,
+        endpoint: str | None = None,
+    ) -> None:
+        """Initialise a rule with URL string."""
+        if not string.startswith("/"):
+            raise ValueError(f"URL rule {string!r} must start with a slash")
+        self.rule = string
+        self.endpoint = endpoint or string
+        self.methods = set(methods or [])
+        self.defaults = dict(defaults or {})
+
+    def __repr__(self) -> str:
+        """Human-readable representation of the rule object."""
+        methods = ", ".join(sorted(self.methods)) if self.methods else ""
+        return f"<Rule {self.rule!r} ({methods}) -> {self.endpoint}>"
+
+
+class Map:
+    """Container class for storing all the URL rules.
+
+    The map maintains insertion order, exposes iteration, and supports
+    length queries to mirror the behaviour expected by the dispatcher.
+
+    :param rules: Sequence of URL rules for this map, defaults to
+        ``None``.
+    """
+
+    def __init__(self, rules: Iterable[Rule] | None = None) -> None:
+        """Initialise mapping with some rules."""
+        self._rules: Iterable[Rule] = rules or []
+
+    def __repr__(self) -> str:
+        """Human-readable representation of mapping object."""
+        return f"<Map {len(self._rules)} rules>"
+
+    def __iter__(self) -> t.Iterator[Rule]:
+        """Iterate over all rules of an endpoint."""
+        return iter(self._rules)
+
+    def __len__(self) -> int:
+        """Return count of rules."""
+        return len(self._rules)
+
+    def add(self, rule: Rule) -> None:
+        """Add new rule to the map."""
+        self._rules.append(rule)
+
+
+def make_response(*args: t.Any) -> Response:
+    """Make a response to return."""
+    from miroslava.globals import current_app
+
+    if not args:
+        return current_app.response_class()
+    if len(args) == 1:
+        args = args[0]
+    return current_app.make_response(args)
+
+
+class HTTPExceptionError(Exception):
+    """Signal a prepared response should short-circuit dispatch."""
+
+    def __init__(self, response: Response) -> None:
+        """Initialise an HTTP exception."""
+        super().__init__()
+        self.response = response
+
+
+def abort(
+    status: int | HTTPStatus | Response,
+    description: str | None = None,
+    headers: HeadersValue | None = None,
+) -> t.NoReturn:
+    """Raise an HTTP error response.
+
+    When provided a ``Response`` or a response tuple, that value is
+    wrapped via ``current_app.make_response``. Otherwise a fresh
+    ``Response`` is created using the current application's response
+    class and the HTTP status phrase as the default body.
+
+    :param status: Status code for the exception.
+    :param description: Error description, defaults to ``None``.
+    :para headers: List of headers while sending response, defaults to
+        ``None``.
+    """
+    from miroslava.globals import current_app
+    from miroslava.wrappers import Response
+
+    if isinstance(status, Response):
+        response = status
+    else:
+        code = int(status)
+        body: ResponseValue = description or HTTPStatus(code).phrase
+        if headers:
+            response = current_app.make_response((body, code, headers))
+        else:
+            response = current_app.make_response((body, code))
+    raise HTTPExceptionError(response)
