@@ -4,7 +4,7 @@ Miroslava's Application
 
 Author: Akshay Mestry <xa@mes3.dev>
 Created on: 31 January, 2026
-Last updated on: 03 February, 2026
+Last updated on: 04 February, 2026
 
 The primary application classes which ties together routing, configs,
 and the server loop.
@@ -39,6 +39,7 @@ from miroslava.utils import HTTPExceptionError
 from miroslava.utils import Map
 from miroslava.utils import Rule
 from miroslava.utils import get_root_path
+from miroslava.utils import show_server_banner
 from miroslava.wrappers import Request
 from miroslava.wrappers import Response
 
@@ -471,17 +472,14 @@ class Miroslava(App):
         sn_port = None
         if server_name:
             sn_host, _, sn_port = server_name.partition(":")
-
         if not host:
             host = sn_host if sn_host else "127.0.0.1"
-
         if port or port == 0:
             port = int(port)
         elif sn_port:
             port = int(sn_port)
         else:
             port = 9001
-
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -490,9 +488,7 @@ class Miroslava(App):
             print(f"Couldn't bind to {host}:{port} due to {err}")
             return
         server.listen(5)
-        print(f" * Serving Miroslava app {self.name!r}")
-        print(f" * Debug mode: {'on' if debug else 'off'}")
-        print(f" * Running on http://{host}:{port}/\nPress CTRL+C to quit")
+        show_server_banner(debug, self.name, host=host, port=port)
         try:
             while True:
                 client, client_address = server.accept()
